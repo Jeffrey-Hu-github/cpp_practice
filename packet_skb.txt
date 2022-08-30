@@ -1,0 +1,96 @@
+sk_buff结构 ,其实就是一个数据包的数据结构。
+/include/ linux/ skbuff.c
+/include/ linux/ skbuff.h
+sk_buff 是linux网络最核心的结构体，它用来管理和控制接收或发送数据包的信息。
+内核中sk_buff结构体在各层协议之间传输不是用拷贝sk_buff结构体，而是通过增加协议头和移动指针来操作的。如果是从L4传输到L2，则是通过往sk_buff结构体中增加该层协议头来操作；如果是从L2到L4，则是通过移动sk_buff结构体中的data指针来实现，不会删除各层协议头。这样做是为了提高CPU的工作效率。
+
+# CLICK_LINUXMODULE
+struct sk_buff *skb()	
+
+struct sk_buff {
+ 
+__u16 transport_header; //传输头相对于skb->head的偏移
+ 
+__u16 network_header;//网络头相对于skb->head的偏移
+ 
+__u16 mac_header;//以太网头相对于skb->head的偏移
+ 
+/* These elements must be at the end, see alloc_skb() for details. */
+ 
+sk_buff_data_t tail;
+ 
+sk_buff_data_t end;
+ 
+unsigned char *head, *data;
+ 
+}
+
+
+数据包的分段存储：
+
+head 指向内存的头，data指向数据的头，head和data指针之间这段空间是预留的叫做headroom ,用于之后加报头用， 同理 tail是数据尾部，end是内存的尾部，中间的空间叫tailroom.
+skb刚分配时，head,data和tail在同一位置，end在末尾，所以刚开始时，headroom大小为0，tailroom大小为size，后续对数据包的操作，通过移动data和tail完成，head和end固定不变。
+
+线性数据，指head - end
+shared_info非线性数据是在end之后的数据包括一部分控制信息和非线性数据，控制信息包括flags和flag list 其实就是链表信息，关联着下一个包的地址，长度是skb->data_len
+skb->len:一个skb数据块的总长度，包括线性数据和控制信息：skb->len= (data - tail) + data_len。
+
+分页，即使用非线性数据区，否则尽量都在线性区，head和end之间
+在skb_shared_info中，skb_frag_t frags[MAX_SKB_FRAGS]
+通过分页，使得一个sk_buff最多能存：64K的数据（非线性区）+ 一页数据（线性区）。
+
+分段，主要指IP分段的实现。当一个数据报过大时，需要分为多个。即一个sk_buff分为多个sk_buff，这些sk_buff形成一个链表。
+分段的实现：
+在skb_shared_info中，struct sk_buff *frag_list
+通过frag_list可以遍历分段列表。
+
+
+初始化空间
+此时head= data =tail ，tail和end之间有一段空间 ,数据空间（data- tail）为0
+static inline struct sk_buff *alloc_skb( unsigned int size ,
+                                        gfp_t priority)
+{
+        return __alloc_skb(size , priority , 0 , NUMA_NO_NONE) ;
+}
+
+为协议头留空间
+当构造一个报文时，要为协议头预留最大可能的空间，减少尾部空间
+head room 大小为len，data room 大小0，tail room大小为原长 - len
+static inline void skb_reserve(struct sk_buff *skb, int len)   // data和tail同时向后移动,为包头留空间。
+{
+	skb->data += len;
+	skb->tail += len;
+}
+
+存数据
+通过调用函数 skb_put() 来使 tail 指针向下移动空出空间来添加数据，然后把数据拷贝进去data,此时 skb->data 和 skb->tail 之间存放的都是数据信息，无协议信息。
+void *skb_put(struct sk_buff *skb, unsigned int len)
+{
+	void *tmp = skb_tail_pointer(skb);
+	SKB_LINEAR_ASSERT(skb);
+	skb->tail += len;
+	skb->len  += len;
+	if (unlikely(skb->tail > skb->end))
+		skb_over_panic(skb, len, __builtin_return_address(0));
+	return tmp;
+}
+
+加协议头
+在skb头部添加协议头，调用函数 skb_push() 来使 data 指针向上移动，空出空间来添加各层协议信息，添加协议信息也是用skb_put()。直到最后到达二层，添加完帧头然后就开始发包了
+void *skb_push(struct sk_buff *skb, unsigned int len)
+{
+	skb->data -= len;
+	skb->len  += len;
+	if (unlikely(skb->data < skb->head))
+		skb_under_panic(skb, len, __builtin_return_address(0));
+	return skb->data;
+}
+
+空出来足够的空间之后，一般用memcpy或者memmove直接往skb->data后边写包头的数据。
+
+先添加4层，再3层，再2层头。
+
+
+
+https://blog.csdn.net/u013743253/article/details/120082861
+https://blog.csdn.net/bluebirdssh/article/details/96162581?utm_medium=distribute.pc_relevant.none-task-blog-2~default~baidujs_baidulandingword~default-0-96162581-blog-120082861.pc_relevant_multi_platform_whitelistv4&spm=1001.2101.3001.4242.1&utm_relevant_index=3
